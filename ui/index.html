@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Contexted Mind</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="mode-pill">
+  <!-- Orb and hover card -->
+  <div id="compact-container">
+    <div id="orb" title="Click to open your context tree">
+      <div id="drag-handle" data-tauri-drag-region title="Drag to move">✥</div>
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <circle cx="12" cy="12" r="4"></circle>
+      </svg>
+    </div>
+    <div id="hover-banner">
+      <div class="hover-task-title" id="hover-task-name"></div>
+      <div class="hover-subtext" id="hover-subtext"></div>
+    </div>
+  </div>
+
+  <!-- Fullscreen blurred context tree -->
+  <div id="modal-backdrop">
+    <img id="desktop-snapshot" alt="" />
+    <div id="blur-layer">
+      <div id="modal-panel">
+        <div class="modal-header">
+          <div class="modal-heading">
+            <div class="active-banner-label">Current task</div>
+            <div class="active-banner-value" id="modal-active-task"></div>
+          </div>
+          <div class="modal-header-actions">
+            <button class="close-btn" id="btn-quit" title="Quit Contexted Mind">Quit</button>
+            <button class="close-btn" id="btn-close-modal">Close (Esc)</button>
+          </div>
+        </div>
+        <div class="add-root-bar">
+          <input type="text" id="new-root-input" placeholder="Add a new task and press Enter" />
+          <button class="btn-primary" id="btn-add-root">+ Add task</button>
+        </div>
+        <div id="tree-container"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="tree.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

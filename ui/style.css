@@ -1,0 +1,374 @@
+:root {
+  --bg-card: rgba(15, 23, 42, 0.94);
+  --border-glass: rgba(148, 163, 184, 0.22);
+  --accent: #38bdf8;
+  --accent-glow: rgba(56, 189, 248, 0.35);
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --success: #4ade80;
+  --danger: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* WebKitGTK refuses typing into inputs that inherit user-select: none. */
+input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text-main);
+}
+
+/* --- Orb and hover card --- */
+#compact-container {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px;
+  width: 100%;
+  height: 100%;
+}
+
+body.flipped #compact-container {
+  flex-direction: row-reverse;
+}
+
+#orb {
+  width: 48px;
+  height: 48px;
+  min-width: 48px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 2px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+
+#orb svg {
+  width: 22px;
+  height: 22px;
+  stroke: var(--accent);
+}
+
+body.no-task #orb {
+  border-color: var(--text-muted);
+}
+
+body.no-task #orb svg {
+  stroke: var(--text-muted);
+}
+
+#drag-handle {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #334155;
+  border: 1px solid var(--border-glass);
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+#hover-banner {
+  display: none;
+  flex: 1;
+  min-width: 0;
+  height: 48px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-glass);
+  border-radius: 12px;
+  padding: 6px 14px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+body.mode-hover #hover-banner {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.hover-task-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hover-subtext {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+/* --- Fullscreen modal --- */
+#modal-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: #0a0f1d;
+  overflow: hidden;
+}
+
+body.mode-modal #compact-container {
+  display: none;
+}
+
+body.mode-modal #modal-backdrop {
+  display: block;
+}
+
+#desktop-snapshot {
+  display: none;
+  position: absolute;
+  /* Overscan hides the soft edge a blur leaves around an image. */
+  inset: -40px;
+  width: calc(100% + 80px);
+  height: calc(100% + 80px);
+  object-fit: cover;
+  filter: blur(14px) saturate(140%);
+}
+
+#desktop-snapshot.loaded {
+  display: block;
+}
+
+#blur-layer {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 15, 29, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+#modal-panel {
+  width: 100%;
+  max-width: 760px;
+  max-height: 84vh;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid var(--border-glass);
+  border-radius: 20px;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-glass);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.modal-heading {
+  min-width: 0;
+}
+
+.modal-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.active-banner-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.active-banner-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.close-btn {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-glass);
+  color: var(--text-main);
+  padding: 7px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.close-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.add-root-bar {
+  display: flex;
+  gap: 10px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border-glass);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.add-root-bar input {
+  flex: 1;
+  min-width: 0;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  padding: 9px 14px;
+  color: var(--text-main);
+  font-size: 14px;
+  outline: none;
+}
+
+.add-root-bar input:focus {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #020617;
+  border: none;
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#tree-container {
+  padding: 10px 24px 18px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.tree-empty {
+  padding: 28px 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.tree-node {
+  margin-top: 8px;
+}
+
+.tree-children {
+  margin-left: 16px;
+  padding-left: 14px;
+  border-left: 1.5px dashed rgba(148, 163, 184, 0.25);
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(30, 41, 59, 0.45);
+  border: 1px solid transparent;
+}
+
+.task-row:hover {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.task-row.is-active {
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.11);
+}
+
+.task-checkbox {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  accent-color: var(--success);
+  cursor: pointer;
+}
+
+.task-title-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font-size: 14px;
+  outline: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.task-title-input:focus {
+  background: rgba(2, 6, 23, 0.6);
+  outline: 1px solid var(--accent);
+}
+
+.task-title-input.done {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.task-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-glass);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  color: var(--text-main);
+  border-color: var(--text-muted);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-btn.active-focus {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.icon-btn.delete:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}

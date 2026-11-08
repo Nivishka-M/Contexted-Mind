@@ -1,0 +1,8 @@
+src-tauri/target/
+src-tauri/gen/
+node_modules/
+
+# The installed app, when the installer was pointed at this folder
+/contexted-mind.exe
+/Uninstall Contexted Mind.lnk
+/uninstall.exe
