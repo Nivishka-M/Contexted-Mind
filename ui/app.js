@@ -1,18 +1,23 @@
 const { invoke } = window.__TAURI__.core;
 const { findTask, deleteTask, setDone, resolveActiveId } = window.TaskTree;
 
+// One page serves two windows: the small transparent orb ("main") and the
+// opaque fullscreen tree ("tree"), which Rust creates when the orb is clicked.
+const isTree = window.__TAURI__.window.getCurrentWindow().label === "tree";
+
 let appData = { active_task_id: null, tasks: [] };
+// Orb window only: "pill", "hover" or "tree" (tree window open, orb hidden).
 let currentMode = "pill";
-// The mode the queue is heading to. A slow modal switch (the desktop snapshot)
-// leaves currentMode on "hover" for a while, and the window hiding for the
-// snapshot fires mouseleave; checking currentMode alone would then queue a
-// collapse that closes the tree the moment it opens.
+// The mode the queue is heading to. Hiding the orb while the tree opens fires
+// mouseleave; checking currentMode alone would queue a stray collapse.
 let targetMode = "pill";
 let cardFlipped = false;
 let hoverCollapseTimer = null;
 // Mode changes run one at a time, so a quick hover-then-click can't interleave
 // window resizes on the Rust side.
 let modeQueue = Promise.resolve();
+// The last save, so closing the tree can wait for an edit committed on blur.
+let lastSave = Promise.resolve();
 
 const el = (id) => document.getElementById(id);
 
@@ -30,15 +35,16 @@ function syncHeaderText() {
   }
 }
 
-async function persist() {
+function persist() {
   appData.active_task_id = resolveActiveId(appData.tasks, appData.active_task_id);
   syncHeaderText();
-  await invoke("save_tree", {
+  lastSave = invoke("save_tree", {
     update: { active_task_id: appData.active_task_id, tasks: appData.tasks },
   });
+  return lastSave;
 }
 
-// --- View modes ---
+// --- Orb window ---
 function switchMode(mode) {
   targetMode = mode;
   if (mode !== "hover") clearTimeout(hoverCollapseTimer);
@@ -48,91 +54,91 @@ function switchMode(mode) {
 
 async function applyMode(mode) {
   if (currentMode === mode) return;
+  if (mode === "tree") {
+    currentMode = "tree";
+    try {
+      await invoke("open_tree", { flipped: cardFlipped });
+    } catch (err) {
+      console.error(err);
+      setPill();
+    }
+    return;
+  }
   const result = await invoke("set_view_mode", { mode, flipped: cardFlipped });
   currentMode = mode;
   cardFlipped = result.flipped;
   document.body.className = `mode-${mode}`;
   document.body.classList.toggle("flipped", cardFlipped);
   syncHeaderText();
+}
 
-  const snapshot = el("desktop-snapshot");
-  if (mode === "modal") {
-    if (result.background) {
-      snapshot.src = result.background;
-      snapshot.classList.add("loaded");
-    }
-    renderTree();
-    forceRepaint();
-    el("new-root-input").focus();
-  } else {
-    // Don't keep a picture of the desktop in memory once the tree is closed.
-    snapshot.removeAttribute("src");
-    snapshot.classList.remove("loaded");
+function setPill() {
+  currentMode = "pill";
+  targetMode = "pill";
+  cardFlipped = false;
+  document.body.className = "mode-pill";
+  syncHeaderText();
+}
+
+function setupOrb() {
+  const compactContainer = el("compact-container");
+  const orb = el("orb");
+
+  // mousemove as well as mouseenter: the orb hides while the pointer is on it
+  // (to open the tree), so WebKit may never see it leave and then skips the
+  // next mouseenter when the orb comes back.
+  const expand = () => {
+    clearTimeout(hoverCollapseTimer);
+    if (targetMode === "pill") switchMode("hover");
+  };
+  orb.addEventListener("mouseenter", expand);
+  orb.addEventListener("mousemove", expand);
+
+  compactContainer.addEventListener("mouseenter", () => clearTimeout(hoverCollapseTimer));
+
+  function scheduleCollapse() {
+    clearTimeout(hoverCollapseTimer);
+    hoverCollapseTimer = setTimeout(() => {
+      if (targetMode === "hover") switchMode("pill");
+    }, 220);
   }
+
+  compactContainer.addEventListener("mouseleave", scheduleCollapse);
+  document.documentElement.addEventListener("mouseleave", scheduleCollapse);
+
+  orb.addEventListener("click", (e) => {
+    if (e.target.id === "drag-handle") return;
+    switchMode("tree");
+  });
+
+  el("hover-banner").addEventListener("click", () => switchMode("tree"));
+
+  // Rust shows the orb again when the tree window closes; pick up any edits.
+  window.__TAURI__.event.listen("tree-closed", async () => {
+    appData = await invoke("get_state");
+    modeQueue = modeQueue.then(setPill);
+  });
 }
 
-// WebKitGTK can skip repainting parts of a window that was just resized from
-// orb size to fullscreen. Touching a paint property over two frames makes it
-// redraw everything.
-function forceRepaint() {
-  document.body.style.opacity = "0.99";
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      document.body.style.opacity = "";
-    })
-  );
-}
-
-window.addEventListener("resize", () => {
-  if (currentMode === "modal") forceRepaint();
-});
-
-const compactContainer = el("compact-container");
-const orb = el("orb");
-
-orb.addEventListener("mouseenter", () => {
-  clearTimeout(hoverCollapseTimer);
-  if (targetMode === "pill") switchMode("hover");
-});
-
-compactContainer.addEventListener("mouseenter", () => clearTimeout(hoverCollapseTimer));
-
-function scheduleCollapse() {
-  clearTimeout(hoverCollapseTimer);
-  hoverCollapseTimer = setTimeout(() => {
-    if (targetMode === "hover") switchMode("pill");
-  }, 220);
-}
-
-compactContainer.addEventListener("mouseleave", scheduleCollapse);
-document.documentElement.addEventListener("mouseleave", scheduleCollapse);
-
-orb.addEventListener("click", (e) => {
-  if (e.target.id === "drag-handle") return;
-  clearTimeout(hoverCollapseTimer);
-  switchMode("modal");
-});
-
-el("hover-banner").addEventListener("click", () => {
-  clearTimeout(hoverCollapseTimer);
-  switchMode("modal");
-});
-
-el("btn-close-modal").addEventListener("click", closeModal);
-el("btn-quit").addEventListener("click", () => invoke("quit_app"));
-
-el("blur-layer").addEventListener("click", (e) => {
-  if (e.target.id === "blur-layer") closeModal();
-});
-
-window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && currentMode === "modal") closeModal();
-});
-
-async function closeModal() {
-  // A title being typed only commits on blur; do it before the tree disappears.
+// --- Tree window ---
+async function closeTree() {
+  // A title being typed only commits on blur; let that save land first.
   if (document.activeElement) document.activeElement.blur();
-  await switchMode("pill");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await lastSave.catch(console.error);
+  await invoke("close_tree");
+}
+
+function setupTree() {
+  document.body.className = "mode-modal";
+  el("btn-close-modal").addEventListener("click", closeTree);
+  el("btn-quit").addEventListener("click", () => invoke("quit_app"));
+  el("blur-layer").addEventListener("click", (e) => {
+    if (e.target.id === "blur-layer") closeTree();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeTree();
+  });
 }
 
 // --- Tree rendering and edits ---
@@ -261,6 +267,18 @@ el("new-root-input").addEventListener("keydown", (e) => {
 });
 
 (async () => {
+  if (isTree) setupTree();
+  else setupOrb();
   appData = await invoke("get_state");
   syncHeaderText();
+  if (isTree) {
+    const background = await invoke("take_snapshot");
+    if (background) {
+      const snapshot = el("desktop-snapshot");
+      snapshot.src = background;
+      snapshot.classList.add("loaded");
+    }
+    renderTree();
+    el("new-root-input").focus();
+  }
 })();

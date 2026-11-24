@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 use tauri::window::Color;
-use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, State, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
+};
 
 const ORB_SIZE: f64 = 56.0;
 const CARD_WIDTH: f64 = 360.0;
@@ -18,6 +21,10 @@ const CARD_WIDTH: f64 = 360.0;
 /// scrim. On Wayland the screenshot portal can block indefinitely (for example
 /// on a permission prompt), and the window is hidden while it runs.
 const CAPTURE_TIMEOUT: Duration = Duration::from_millis(2500);
+
+const TREE_LABEL: &str = "tree";
+/// Matches #modal-backdrop in style.css, so the tree window's first frame isn't white.
+const TREE_BACKGROUND: Color = Color(10, 15, 29, 255);
 
 /// Set while a snapshot is in flight, so a stuck portal call isn't joined by more.
 static CAPTURE_BUSY: AtomicBool = AtomicBool::new(false);
@@ -63,20 +70,21 @@ pub struct TreeUpdate {
 enum Mode {
     Pill,
     Hover,
-    Modal,
+    /// The tree window is open and the orb is hidden.
+    Tree,
 }
 
 struct Runtime {
     data: AppData,
     mode: Mode,
+    /// Blurred-desktop snapshot waiting for the tree window to pick it up.
+    snapshot: Option<String>,
 }
 
 pub struct AppState(Mutex<Runtime>);
 
 #[derive(Serialize)]
 pub struct ViewResult {
-    /// Blurred-desktop snapshot, only when entering the modal.
-    background: Option<String>,
     /// The hover card opened to the left because the orb is near the right edge.
     flipped: bool,
 }
@@ -130,7 +138,7 @@ fn quit_app(app: AppHandle) {
 }
 
 /// Snapshots the monitor containing (x, y). Returns None when capture is refused
-/// (e.g. a declined Wayland portal prompt); the modal then uses a solid scrim.
+/// (e.g. a declined Wayland portal prompt); the tree then uses a solid scrim.
 fn capture_desktop_bg(x: i32, y: i32) -> Option<String> {
     let monitor = xcap::Monitor::from_point(x, y)
         .ok()
@@ -179,12 +187,6 @@ fn stick_to_all_workspaces(window: &WebviewWindow) {
     let _ = window.set_visible_on_all_workspaces(true);
 }
 
-/// Matches #modal-backdrop in style.css. While the tree is open the window is
-/// opaque: WebKitGTK repaints a transparent window that just grew from orb size
-/// only where something changes (hover, focus), leaving the rest see-through.
-const MODAL_BACKGROUND: Color = Color(10, 15, 29, 255);
-const TRANSPARENT: Color = Color(0, 0, 0, 0);
-
 /// Puts the window back to orb size at the saved position.
 fn restore_orb_geometry(window: &WebviewWindow, x: i32, y: i32) {
     let _ = window.set_size(LogicalSize::new(ORB_SIZE, ORB_SIZE));
@@ -230,39 +232,17 @@ async fn set_view_mode(
     let scale = window.scale_factor().unwrap_or(1.0);
     match mode.as_str() {
         "pill" => {
-            let (x, y, was_modal) = {
+            let (x, y) = {
                 let mut rt = state.0.lock().unwrap();
                 if rt.mode == Mode::Hover {
                     remember_orb_position(&window, &mut rt, flipped);
                 }
-                let was_modal = rt.mode == Mode::Modal;
                 rt.mode = Mode::Pill;
-                (rt.data.saved_x, rt.data.saved_y, was_modal)
+                (rt.data.saved_x, rt.data.saved_y)
             };
-            let _ = window.set_fullscreen(false);
-            if was_modal {
-                // X11 window managers restore the pre-fullscreen geometry
-                // asynchronously; let that land before shrinking back to the orb.
-                wait_ms(120).await;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let _ = window.set_resizable(false);
-                let _ = window.set_background_color(Some(TRANSPARENT));
-            }
             restore_orb_geometry(&window, x, y);
             let _ = window.set_always_on_top(true);
-            stick_to_all_workspaces(&window);
-            #[cfg(target_os = "linux")]
-            if was_modal {
-                // A late configure from the WM can still undo the first resize.
-                wait_ms(150).await;
-                restore_orb_geometry(&window, x, y);
-            }
-            Ok(ViewResult {
-                background: None,
-                flipped: false,
-            })
+            Ok(ViewResult { flipped: false })
         }
         "hover" => {
             let flip = card_needs_flip(&window);
@@ -278,58 +258,121 @@ async fn set_view_mode(
                 }
             }
             let _ = window.set_size(LogicalSize::new(CARD_WIDTH, ORB_SIZE));
-            Ok(ViewResult {
-                background: None,
-                flipped: flip,
-            })
-        }
-        "modal" => {
-            {
-                let mut rt = state.0.lock().unwrap();
-                if rt.mode == Mode::Hover {
-                    remember_orb_position(&window, &mut rt, flipped);
-                }
-                rt.mode = Mode::Modal;
-            }
-            // Read the monitor while the window is still mapped; a hidden X11
-            // window can report a stale or missing monitor.
-            let monitor = window.current_monitor().ok().flatten();
-            let (px, py) = match (&monitor, window.outer_position()) {
-                (_, Ok(pos)) => (pos.x, pos.y),
-                (Some(m), _) => (m.position().x, m.position().y),
-                _ => (0, 0),
-            };
-
-            // Hide first so the orb and hover card aren't part of the snapshot.
-            let _ = window.hide();
-            wait_ms(60).await;
-            let background = capture_with_timeout(px, py).await;
-
-            // GTK pins a non-resizable window to its current size, and Mutter
-            // refuses to fullscreen such a window, so the tree would open in
-            // the small orb-sized window.
-            #[cfg(target_os = "linux")]
-            {
-                let _ = window.set_resizable(true);
-                let _ = window.set_background_color(Some(MODAL_BACKGROUND));
-            }
-            // Cover the monitor explicitly too, in case the WM ignores fullscreen.
-            if let Some(m) = &monitor {
-                let _ = window.set_position(*m.position());
-                let _ = window.set_size(*m.size());
-            }
-            let _ = window.show();
-            let _ = window.set_fullscreen(true);
-            let _ = window.set_always_on_top(true);
-            stick_to_all_workspaces(&window);
-            let _ = window.set_focus();
-            Ok(ViewResult {
-                background,
-                flipped: false,
-            })
+            Ok(ViewResult { flipped: flip })
         }
         _ => Err("Unknown mode".into()),
     }
+}
+
+/// Opens the context tree in its own window. The tree used to be the orb window
+/// grown to fullscreen, but WebKitGTK on Wayland/XWayland (seen on GNOME with
+/// Intel graphics) failed to repaint a transparent window resized that far,
+/// leaving it see-through or white. This window is opaque and created at the
+/// monitor's size, so it is never transparent and never resized.
+#[tauri::command]
+async fn open_tree(
+    flipped: bool,
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some(tree) = app.get_webview_window(TREE_LABEL) {
+        let _ = tree.set_focus();
+        return Ok(());
+    }
+    {
+        let mut rt = state.0.lock().unwrap();
+        if rt.mode == Mode::Hover {
+            remember_orb_position(&window, &mut rt, flipped);
+        }
+        rt.mode = Mode::Tree;
+        rt.snapshot = None;
+    }
+
+    // Read the monitor while the orb is still mapped; a hidden X11 window can
+    // report a stale or missing monitor.
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let (px, py) = window
+        .outer_position()
+        .map(|p| (p.x, p.y))
+        .unwrap_or((0, 0));
+
+    // Hide the orb so it and the hover card aren't part of the snapshot.
+    let _ = window.hide();
+    wait_ms(80).await;
+    let snapshot = capture_with_timeout(px, py).await;
+    state.0.lock().unwrap().snapshot = snapshot;
+
+    let mut builder = WebviewWindowBuilder::new(&app, TREE_LABEL, WebviewUrl::App("index.html".into()))
+        .title("Contexted Mind")
+        .decorations(false)
+        .transparent(false)
+        .background_color(TREE_BACKGROUND)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible_on_all_workspaces(true)
+        .shadow(false)
+        .focused(true);
+    if let Some(m) = &monitor {
+        let scale = m.scale_factor();
+        let pos = m.position().to_logical::<f64>(scale);
+        let size = m.size().to_logical::<f64>(scale);
+        builder = builder.position(pos.x, pos.y).inner_size(size.width, size.height);
+    }
+    // Fullscreen covers GNOME's top bar; the explicit monitor-sized geometry
+    // above is the fallback if the window manager declines.
+    builder = builder.fullscreen(true);
+
+    match builder.build() {
+        Ok(tree) => {
+            let _ = tree.set_focus();
+            Ok(())
+        }
+        Err(e) => {
+            show_orb(&app);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Hands the desktop snapshot to the tree window once, then forgets it.
+#[tauri::command]
+fn take_snapshot(state: State<AppState>) -> Option<String> {
+    state.0.lock().unwrap().snapshot.take()
+}
+
+#[tauri::command]
+fn close_tree(app: AppHandle) {
+    match app.get_webview_window(TREE_LABEL) {
+        // The Destroyed event brings the orb back.
+        Some(tree) => {
+            let _ = tree.destroy();
+        }
+        None => show_orb(&app),
+    }
+}
+
+/// Puts the orb back where it was and tells its page to reset to the pill.
+fn show_orb(app: &AppHandle) {
+    let Some(orb) = app.get_webview_window("main") else {
+        return;
+    };
+    let (x, y) = {
+        let state = app.state::<AppState>();
+        let mut rt = state.0.lock().unwrap();
+        rt.mode = Mode::Pill;
+        rt.snapshot = None;
+        (rt.data.saved_x, rt.data.saved_y)
+    };
+    restore_orb_geometry(&orb, x, y);
+    let _ = orb.show();
+    let _ = orb.set_always_on_top(true);
+    stick_to_all_workspaces(&orb);
+    let _ = orb.emit("tree-closed", ());
 }
 
 /// Gives the compositor or window manager a moment to apply a window change.
@@ -352,11 +395,6 @@ fn main() {
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
-        // Accelerated compositing in a transparent X11 window leaves regions
-        // unpainted after a resize; the software path repaints the whole window.
-        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
-            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        }
     }
 
     let data = load_from(&storage_path());
@@ -366,13 +404,24 @@ fn main() {
         .manage(AppState(Mutex::new(Runtime {
             data,
             mode: Mode::Pill,
+            snapshot: None,
         })))
         .invoke_handler(tauri::generate_handler![
             get_state,
             save_tree,
             set_view_mode,
+            open_tree,
+            take_snapshot,
+            close_tree,
             quit_app
         ])
+        .on_window_event(|window, event| {
+            if window.label() == TREE_LABEL {
+                if let WindowEvent::Destroyed = event {
+                    show_orb(window.app_handle());
+                }
+            }
+        })
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Windows creates new windows at least 136px wide, ignoring the
