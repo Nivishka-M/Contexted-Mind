@@ -3,6 +3,11 @@ const { findTask, deleteTask, setDone, resolveActiveId } = window.TaskTree;
 
 let appData = { active_task_id: null, tasks: [] };
 let currentMode = "pill";
+// The mode the queue is heading to. A slow modal switch (the desktop snapshot)
+// leaves currentMode on "hover" for a while, and the window hiding for the
+// snapshot fires mouseleave; checking currentMode alone would then queue a
+// collapse that closes the tree the moment it opens.
+let targetMode = "pill";
 let cardFlipped = false;
 let hoverCollapseTimer = null;
 // Mode changes run one at a time, so a quick hover-then-click can't interleave
@@ -35,6 +40,8 @@ async function persist() {
 
 // --- View modes ---
 function switchMode(mode) {
+  targetMode = mode;
+  if (mode !== "hover") clearTimeout(hoverCollapseTimer);
   modeQueue = modeQueue.then(() => applyMode(mode)).catch(console.error);
   return modeQueue;
 }
@@ -68,7 +75,7 @@ const orb = el("orb");
 
 orb.addEventListener("mouseenter", () => {
   clearTimeout(hoverCollapseTimer);
-  if (currentMode === "pill") switchMode("hover");
+  if (targetMode === "pill") switchMode("hover");
 });
 
 compactContainer.addEventListener("mouseenter", () => clearTimeout(hoverCollapseTimer));
@@ -76,7 +83,7 @@ compactContainer.addEventListener("mouseenter", () => clearTimeout(hoverCollapse
 function scheduleCollapse() {
   clearTimeout(hoverCollapseTimer);
   hoverCollapseTimer = setTimeout(() => {
-    if (currentMode === "hover") switchMode("pill");
+    if (targetMode === "hover") switchMode("pill");
   }, 220);
 }
 

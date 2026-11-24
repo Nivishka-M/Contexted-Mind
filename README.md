@@ -39,7 +39,21 @@ cargo tauri build --bundles rpm
 sudo dnf install "./src-tauri/target/release/bundle/rpm/Contexted Mind-0.1.0-1.x86_64.rpm"
 ```
 
-On Wayland the app runs through XWayland so that always-on-top and positioning work. The desktop may ask for permission to take a screenshot the first time you open the tree. If you decline, the tree opens over a solid dark background instead.
+To update an installed copy after pulling new changes, rebuild and reinstall:
+
+```bash
+git pull
+```
+
+```bash
+cargo tauri build --bundles rpm
+```
+
+```bash
+sudo dnf reinstall "./src-tauri/target/release/bundle/rpm/Contexted Mind-0.1.0-1.x86_64.rpm"
+```
+
+On Wayland the app runs through XWayland so that always-on-top and positioning work. The orb stays on every workspace. The desktop may ask for permission to take a screenshot the first time you open the tree. If you decline, or the screenshot takes longer than about 2.5 seconds, the tree opens over a solid dark background instead.
 
 ## Tests
 

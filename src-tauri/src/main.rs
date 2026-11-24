@@ -6,12 +6,20 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, State, WebviewWindow};
 
 const ORB_SIZE: f64 = 56.0;
 const CARD_WIDTH: f64 = 360.0;
+/// How long the modal waits for a desktop snapshot before opening over a solid
+/// scrim. On Wayland the screenshot portal can block indefinitely (for example
+/// on a permission prompt), and the window is hidden while it runs.
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(2500);
+
+/// Set while a snapshot is in flight, so a stuck portal call isn't joined by more.
+static CAPTURE_BUSY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct TaskNode {
@@ -120,11 +128,10 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// Snapshots the monitor the orb is on. Returns None when capture is refused
+/// Snapshots the monitor containing (x, y). Returns None when capture is refused
 /// (e.g. a declined Wayland portal prompt); the modal then uses a solid scrim.
-fn capture_desktop_bg(window: &WebviewWindow) -> Option<String> {
-    let pos = window.outer_position().ok()?;
-    let monitor = xcap::Monitor::from_point(pos.x, pos.y)
+fn capture_desktop_bg(x: i32, y: i32) -> Option<String> {
+    let monitor = xcap::Monitor::from_point(x, y)
         .ok()
         .or_else(|| xcap::Monitor::all().ok()?.into_iter().next())?;
     let shot = monitor.capture_image().ok()?;
@@ -145,6 +152,36 @@ fn capture_desktop_bg(window: &WebviewWindow) -> Option<String> {
         "data:image/jpeg;base64,{}",
         BASE64.encode(buf.into_inner())
     ))
+}
+
+/// Runs the snapshot on its own thread and gives up after CAPTURE_TIMEOUT, so a
+/// screenshot portal that never answers can't leave the app with no window.
+async fn capture_with_timeout(x: i32, y: i32) -> Option<String> {
+    if CAPTURE_BUSY.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let shot = capture_desktop_bg(x, y);
+        CAPTURE_BUSY.store(false, Ordering::SeqCst);
+        let _ = tx.send(shot);
+    });
+    tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(CAPTURE_TIMEOUT).ok().flatten())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Shows the orb on every workspace. Re-applied after each hide/show and
+/// fullscreen change, since some X11 window managers drop sticky state on remap.
+fn stick_to_all_workspaces(window: &WebviewWindow) {
+    let _ = window.set_visible_on_all_workspaces(true);
+}
+
+/// Puts the window back to orb size at the saved position.
+fn restore_orb_geometry(window: &WebviewWindow, x: i32, y: i32) {
+    let _ = window.set_size(LogicalSize::new(ORB_SIZE, ORB_SIZE));
+    let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
 /// Records where the orb sits. Called only while the window is orb-anchored,
@@ -186,18 +223,32 @@ async fn set_view_mode(
     let scale = window.scale_factor().unwrap_or(1.0);
     match mode.as_str() {
         "pill" => {
-            let (x, y) = {
+            let (x, y, was_modal) = {
                 let mut rt = state.0.lock().unwrap();
                 if rt.mode == Mode::Hover {
                     remember_orb_position(&window, &mut rt, flipped);
                 }
+                let was_modal = rt.mode == Mode::Modal;
                 rt.mode = Mode::Pill;
-                (rt.data.saved_x, rt.data.saved_y)
+                (rt.data.saved_x, rt.data.saved_y, was_modal)
             };
             let _ = window.set_fullscreen(false);
-            let _ = window.set_size(LogicalSize::new(ORB_SIZE, ORB_SIZE));
-            let _ = window.set_position(PhysicalPosition::new(x, y));
+            if was_modal {
+                // X11 window managers restore the pre-fullscreen geometry
+                // asynchronously; let that land before shrinking back to the orb.
+                wait_ms(120).await;
+            }
+            #[cfg(target_os = "linux")]
+            let _ = window.set_resizable(false);
+            restore_orb_geometry(&window, x, y);
             let _ = window.set_always_on_top(true);
+            stick_to_all_workspaces(&window);
+            #[cfg(target_os = "linux")]
+            if was_modal {
+                // A late configure from the WM can still undo the first resize.
+                wait_ms(150).await;
+                restore_orb_geometry(&window, x, y);
+            }
             Ok(ViewResult {
                 background: None,
                 flipped: false,
@@ -230,13 +281,34 @@ async fn set_view_mode(
                 }
                 rt.mode = Mode::Modal;
             }
+            // Read the monitor while the window is still mapped; a hidden X11
+            // window can report a stale or missing monitor.
+            let monitor = window.current_monitor().ok().flatten();
+            let (px, py) = match (&monitor, window.outer_position()) {
+                (_, Ok(pos)) => (pos.x, pos.y),
+                (Some(m), _) => (m.position().x, m.position().y),
+                _ => (0, 0),
+            };
+
             // Hide first so the orb and hover card aren't part of the snapshot.
             let _ = window.hide();
-            wait_for_compositor().await;
-            let background = capture_desktop_bg(&window);
-            let _ = window.set_fullscreen(true);
+            wait_ms(60).await;
+            let background = capture_with_timeout(px, py).await;
+
+            // GTK pins a non-resizable window to its current size, and Mutter
+            // refuses to fullscreen such a window, so the tree would open in
+            // the small orb-sized window.
+            #[cfg(target_os = "linux")]
+            let _ = window.set_resizable(true);
+            // Cover the monitor explicitly too, in case the WM ignores fullscreen.
+            if let Some(m) = &monitor {
+                let _ = window.set_position(*m.position());
+                let _ = window.set_size(*m.size());
+            }
             let _ = window.show();
+            let _ = window.set_fullscreen(true);
             let _ = window.set_always_on_top(true);
+            stick_to_all_workspaces(&window);
             let _ = window.set_focus();
             Ok(ViewResult {
                 background,
@@ -247,10 +319,10 @@ async fn set_view_mode(
     }
 }
 
-/// Gives the compositor a moment to remove the hidden window from the screen.
-async fn wait_for_compositor() {
-    let _ = tauri::async_runtime::spawn_blocking(|| {
-        std::thread::sleep(Duration::from_millis(60));
+/// Gives the compositor or window manager a moment to apply a window change.
+async fn wait_ms(ms: u64) {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(ms));
     })
     .await;
 }
@@ -290,6 +362,7 @@ fn main() {
                 let _ = window.set_size(LogicalSize::new(ORB_SIZE, ORB_SIZE));
                 let _ = window.set_position(PhysicalPosition::new(x, y));
                 let _ = window.show();
+                stick_to_all_workspaces(&window);
             }
             Ok(())
         })
