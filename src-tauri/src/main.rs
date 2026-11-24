@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
+use tauri::window::Color;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, State, WebviewWindow};
 
 const ORB_SIZE: f64 = 56.0;
@@ -178,6 +179,12 @@ fn stick_to_all_workspaces(window: &WebviewWindow) {
     let _ = window.set_visible_on_all_workspaces(true);
 }
 
+/// Matches #modal-backdrop in style.css. While the tree is open the window is
+/// opaque: WebKitGTK repaints a transparent window that just grew from orb size
+/// only where something changes (hover, focus), leaving the rest see-through.
+const MODAL_BACKGROUND: Color = Color(10, 15, 29, 255);
+const TRANSPARENT: Color = Color(0, 0, 0, 0);
+
 /// Puts the window back to orb size at the saved position.
 fn restore_orb_geometry(window: &WebviewWindow, x: i32, y: i32) {
     let _ = window.set_size(LogicalSize::new(ORB_SIZE, ORB_SIZE));
@@ -239,7 +246,10 @@ async fn set_view_mode(
                 wait_ms(120).await;
             }
             #[cfg(target_os = "linux")]
-            let _ = window.set_resizable(false);
+            {
+                let _ = window.set_resizable(false);
+                let _ = window.set_background_color(Some(TRANSPARENT));
+            }
             restore_orb_geometry(&window, x, y);
             let _ = window.set_always_on_top(true);
             stick_to_all_workspaces(&window);
@@ -299,7 +309,10 @@ async fn set_view_mode(
             // refuses to fullscreen such a window, so the tree would open in
             // the small orb-sized window.
             #[cfg(target_os = "linux")]
-            let _ = window.set_resizable(true);
+            {
+                let _ = window.set_resizable(true);
+                let _ = window.set_background_color(Some(MODAL_BACKGROUND));
+            }
             // Cover the monitor explicitly too, in case the WM ignores fullscreen.
             if let Some(m) = &monitor {
                 let _ = window.set_position(*m.position());
@@ -338,6 +351,11 @@ fn main() {
         }
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        // Accelerated compositing in a transparent X11 window leaves regions
+        // unpainted after a resize; the software path repaints the whole window.
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
     }
 

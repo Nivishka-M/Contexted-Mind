@@ -62,6 +62,7 @@ async function applyMode(mode) {
       snapshot.classList.add("loaded");
     }
     renderTree();
+    forceRepaint();
     el("new-root-input").focus();
   } else {
     // Don't keep a picture of the desktop in memory once the tree is closed.
@@ -69,6 +70,22 @@ async function applyMode(mode) {
     snapshot.classList.remove("loaded");
   }
 }
+
+// WebKitGTK can skip repainting parts of a window that was just resized from
+// orb size to fullscreen. Touching a paint property over two frames makes it
+// redraw everything.
+function forceRepaint() {
+  document.body.style.opacity = "0.99";
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      document.body.style.opacity = "";
+    })
+  );
+}
+
+window.addEventListener("resize", () => {
+  if (currentMode === "modal") forceRepaint();
+});
 
 const compactContainer = el("compact-container");
 const orb = el("orb");
