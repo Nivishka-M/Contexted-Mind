@@ -53,7 +53,9 @@ cargo tauri build --bundles rpm
 sudo dnf reinstall "./src-tauri/target/release/bundle/rpm/Contexted Mind-0.1.0-1.x86_64.rpm"
 ```
 
-On Wayland the app runs through XWayland so that always-on-top and positioning work. The orb stays on every workspace. The desktop may ask for permission to take a screenshot the first time you open the tree. If you decline, or the screenshot takes longer than about 2.5 seconds, the tree opens over a solid dark background instead.
+On Wayland the app runs through XWayland so that always-on-top and positioning work, and the orb stays on every workspace. The tree opens over a solid dark background rather than a blurred picture of the desktop, because taking that picture on Wayland needs screenshot permission and makes GNOME flash the screen white each time. To have the blur anyway, start the app with `CONTEXTED_MIND_BLUR=1 contexted-mind`.
+
+The app draws with WebKitGTK's software renderer on Linux, because its GPU path left parts of the window unpainted under XWayland. To try the GPU path, start it with `WEBKIT_DISABLE_COMPOSITING_MODE=0 contexted-mind`.
 
 ## Tests
 

@@ -163,10 +163,29 @@ fn capture_desktop_bg(x: i32, y: i32) -> Option<String> {
     ))
 }
 
+/// Whether to snapshot the desktop for the blurred backdrop. Not on Wayland:
+/// the only route there is the screenshot portal, which asks for permission and
+/// makes GNOME flash the whole screen white on every capture, each time the
+/// tree opens. The tree then sits on a solid background. Setting
+/// CONTEXTED_MIND_BLUR=1 turns the snapshot back on.
+fn desktop_capture_allowed() -> bool {
+    if std::env::var_os("CONTEXTED_MIND_BLUR").is_some_and(|v| v == "1") {
+        return true;
+    }
+    !is_wayland_session()
+}
+
+/// Read from the session, not GDK_BACKEND, which main() forces to x11.
+fn is_wayland_session() -> bool {
+    cfg!(target_os = "linux")
+        && (std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
+            || std::env::var_os("WAYLAND_DISPLAY").is_some())
+}
+
 /// Runs the snapshot on its own thread and gives up after CAPTURE_TIMEOUT, so a
 /// screenshot portal that never answers can't leave the app with no window.
 async fn capture_with_timeout(x: i32, y: i32) -> Option<String> {
-    if CAPTURE_BUSY.swap(true, Ordering::SeqCst) {
+    if !desktop_capture_allowed() || CAPTURE_BUSY.swap(true, Ordering::SeqCst) {
         return None;
     }
     let (tx, rx) = mpsc::channel();
@@ -303,8 +322,12 @@ async fn open_tree(
 
     // Hide the orb so it and the hover card aren't part of the snapshot.
     let _ = window.hide();
-    wait_ms(80).await;
-    let snapshot = capture_with_timeout(px, py).await;
+    let snapshot = if desktop_capture_allowed() {
+        wait_ms(80).await;
+        capture_with_timeout(px, py).await
+    } else {
+        None
+    };
     state.0.lock().unwrap().snapshot = snapshot;
 
     let mut builder = WebviewWindowBuilder::new(&app, TREE_LABEL, WebviewUrl::App("index.html".into()))
@@ -394,6 +417,14 @@ fn main() {
         }
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        // WebKitGTK's GPU compositing under XWayland (seen on GNOME with Intel
+        // graphics) repaints only the regions under the pointer or focus, so
+        // rows and buttons flicker and vanish. Software painting redraws the
+        // whole page and is plenty fast for this UI. WEBKIT_DISABLE_COMPOSITING_MODE=0
+        // turns GPU compositing back on.
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
     }
 
