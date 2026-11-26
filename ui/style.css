@@ -74,6 +74,15 @@ body.no-task #orb svg {
   stroke: var(--text-muted);
 }
 
+/* A task in progress is past its deadline. */
+body.has-overdue #orb {
+  border-color: var(--danger);
+}
+
+body.has-overdue #orb svg {
+  stroke: var(--danger);
+}
+
 #drag-handle {
   position: absolute;
   top: -2px;
@@ -335,6 +344,73 @@ body.mode-modal #modal-backdrop {
 .task-title-input.done {
   text-decoration: line-through;
   color: var(--text-muted);
+}
+
+.overdue-icon {
+  display: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-right: -4px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  cursor: default;
+}
+
+.task-row.overdue .overdue-icon {
+  display: inline-block;
+}
+
+.icon-btn.deadline-btn.has-deadline {
+  color: var(--text-main);
+}
+
+.task-row.overdue .icon-btn.deadline-btn {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.deadline-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 2px 38px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.5);
+  border: 1px solid var(--border-glass);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.deadline-editor input {
+  color-scheme: dark;
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-main);
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.deadline-editor input:focus {
+  outline: 1px solid var(--accent);
+}
+
+.deadline-label {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.deadline-hint {
+  flex-basis: 100%;
+  font-size: 11px;
 }
 
 .task-actions {
