@@ -4,7 +4,8 @@ A small always-on-top orb that holds your current task and a tree of tasks and s
 
 - **Hover** the orb to see your current task.
 - **Click** it to blur the desktop and open the tree, where you can add, edit, delete, finish and focus tasks.
-- **Drag** it by the small ✥ handle. It remembers where you left it.
+- **Reorder** tasks by dragging the ⋮⋮ grip at the start of a row. Drop on the top or bottom half of another row to place the task, with its subtasks, above or below it at that row's level. While editing a title, Alt+↑ and Alt+↓ move the task among its siblings.
+- **Drag** the orb by the small ✥ handle. It remembers where you left it.
 - **Esc** or a click on the blurred background closes the tree. **Quit** is in the tree's header, because the orb has no taskbar entry.
 
 Tasks are saved to `%APPDATA%\contexted-mind\tasks.json` on Windows and `~/.config/contexted-mind/tasks.json` on Fedora. The desktop snapshot behind the blur stays in memory and is dropped when the tree closes.

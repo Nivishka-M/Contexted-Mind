@@ -588,6 +588,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
+ "gtk",
  "image",
  "serde",
  "serde_json",

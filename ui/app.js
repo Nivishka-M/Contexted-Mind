@@ -1,5 +1,5 @@
 const { invoke } = window.__TAURI__.core;
-const { findTask, deleteTask, setDone, resolveActiveId } = window.TaskTree;
+const { findTask, deleteTask, setDone, resolveActiveId, moveTask, shiftTask } = window.TaskTree;
 
 // One page serves two windows: the small transparent orb ("main") and the
 // opaque fullscreen tree ("tree"), which Rust creates when the orb is clicked.
@@ -70,6 +70,27 @@ async function applyMode(mode) {
   document.body.className = `mode-${mode}`;
   document.body.classList.toggle("flipped", cardFlipped);
   syncHeaderText();
+  updateHitRegion();
+}
+
+// Tells Rust which parts of the orb window take clicks. The orb's window is a
+// square with see-through corners, and clicks there should reach whatever is
+// underneath. Only applied on Linux.
+function updateHitRegion() {
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  };
+  // With the card open the whole window takes clicks: it is barely larger
+  // than the card, and WebKit sends no mouseleave when the pointer exits
+  // through a click-through part of the window, so the card wouldn't close.
+  const shapes = document.body.classList.contains("mode-hover")
+    ? [{ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight, round: false }]
+    : [
+        { ...box(el("orb")), round: true },
+        { ...box(el("drag-handle")), round: true },
+      ];
+  invoke("set_hit_region", { shapes }).catch(console.error);
 }
 
 function setPill() {
@@ -78,6 +99,7 @@ function setPill() {
   cardFlipped = false;
   document.body.className = "mode-pill";
   syncHeaderText();
+  updateHitRegion();
 }
 
 function setupOrb() {
@@ -137,7 +159,9 @@ function setupTree() {
     if (e.target.id === "blur-layer") closeTree();
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeTree();
+    if (e.key !== "Escape") return;
+    if (drag) cancelDrag();
+    else closeTree();
   });
 }
 
@@ -171,6 +195,13 @@ function buildNodeElement(node) {
 
   const row = document.createElement("div");
   row.className = "task-row" + (isActive ? " is-active" : "");
+  row.dataset.rowId = node.id;
+
+  const grip = document.createElement("div");
+  grip.className = "drag-grip";
+  grip.textContent = "⋮⋮";
+  grip.title = "Drag to reorder. Or Alt+↑ / Alt+↓ while editing the title.";
+  grip.addEventListener("pointerdown", (e) => startDrag(e, node.id, row));
 
   const cb = document.createElement("input");
   cb.type = "checkbox";
@@ -192,8 +223,18 @@ function buildNodeElement(node) {
     input.value = node.title;
     await persist();
   });
-  input.addEventListener("keydown", (e) => {
+  input.addEventListener("keydown", async (e) => {
     if (e.key === "Enter") input.blur();
+    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      // Keep a title edit that hasn't been committed yet.
+      node.title = input.value.trim() || node.title;
+      if (shiftTask(appData.tasks, node.id, e.key === "ArrowUp" ? -1 : 1)) {
+        await commit();
+        const moved = document.querySelector(`[data-task-id="${node.id}"]`);
+        if (moved) moved.focus();
+      }
+    }
   });
 
   const actions = document.createElement("div");
@@ -226,7 +267,7 @@ function buildNodeElement(node) {
   });
 
   actions.append(focusBtn, subBtn, delBtn);
-  row.append(cb, input, actions);
+  row.append(grip, cb, input, actions);
   wrapper.appendChild(row);
 
   if (node.children.length > 0) {
@@ -252,6 +293,74 @@ function renderTree() {
   syncHeaderText();
 }
 
+// --- Drag to reorder ---
+// Pointer events rather than HTML5 drag and drop, which WebKitGTK handles
+// unreliably. Dropping on the top or bottom half of a row places the dragged
+// task (with its subtasks) above or below that row, at that row's level.
+let drag = null;
+
+function startDrag(e, id, row) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  // Commit a title being edited before the tree re-renders.
+  if (document.activeElement) document.activeElement.blur();
+  drag = { id, row, target: null, place: null };
+  row.classList.add("dragging");
+  document.body.classList.add("is-dragging");
+  window.addEventListener("pointermove", onDragMove);
+  window.addEventListener("pointerup", onDragEnd);
+}
+
+function clearDropMarker() {
+  if (drag && drag.target) drag.target.classList.remove("drop-before", "drop-after");
+}
+
+function onDragMove(e) {
+  if (!drag) return;
+  autoScroll(e.clientY);
+  const hit = document.elementFromPoint(e.clientX, e.clientY);
+  const row = hit && hit.closest(".task-row");
+  // Not onto itself or anything inside it.
+  const valid = row && !drag.row.parentElement.contains(row);
+  const rect = valid && row.getBoundingClientRect();
+  const place = valid && e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  if (valid && row === drag.target && place === drag.place) return;
+  clearDropMarker();
+  drag.target = valid ? row : null;
+  drag.place = valid ? place : null;
+  if (valid) row.classList.add(place === "before" ? "drop-before" : "drop-after");
+}
+
+function autoScroll(y) {
+  const box = el("tree-container");
+  const r = box.getBoundingClientRect();
+  if (y < r.top + 32) box.scrollTop -= 12;
+  else if (y > r.bottom - 32) box.scrollTop += 12;
+}
+
+function endDrag() {
+  clearDropMarker();
+  drag.row.classList.remove("dragging");
+  document.body.classList.remove("is-dragging");
+  window.removeEventListener("pointermove", onDragMove);
+  window.removeEventListener("pointerup", onDragEnd);
+  const done = drag;
+  drag = null;
+  return done;
+}
+
+function cancelDrag() {
+  if (drag) endDrag();
+}
+
+async function onDragEnd() {
+  if (!drag) return;
+  const { id, target, place } = endDrag();
+  if (target && moveTask(appData.tasks, id, target.dataset.rowId, place)) {
+    await commit();
+  }
+}
+
 async function addRootTask() {
   const input = el("new-root-input");
   const title = input.value.trim();
@@ -268,7 +377,13 @@ el("new-root-input").addEventListener("keydown", (e) => {
 
 (async () => {
   if (isTree) setupTree();
-  else setupOrb();
+  else {
+    setupOrb();
+    updateHitRegion();
+    // The card's size is only final once the window has grown to fit it,
+    // which can land after the mode change has been applied.
+    window.addEventListener("resize", updateHitRegion);
+  }
   appData = await invoke("get_state");
   syncHeaderText();
   if (isTree) {

@@ -362,6 +362,64 @@ async fn open_tree(
     }
 }
 
+/// A clickable part of the orb window, in CSS pixels.
+#[derive(Deserialize, Debug)]
+pub struct HitShape {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    /// An ellipse filling the box rather than the box itself.
+    round: bool,
+}
+
+/// Approximates a shape with whole-pixel rectangles (x, y, width, height):
+/// one per pixel row for a round shape, so its corners stay click-through.
+fn shape_rects(s: &HitShape) -> Vec<(i32, i32, i32, i32)> {
+    let (x0, y0) = (s.x.floor() as i32, s.y.floor() as i32);
+    let (w, h) = ((s.x + s.w).ceil() as i32 - x0, (s.y + s.h).ceil() as i32 - y0);
+    if w <= 0 || h <= 0 {
+        return vec![];
+    }
+    if !s.round {
+        return vec![(x0, y0, w, h)];
+    }
+    let (rx, ry) = (w as f64 / 2.0, h as f64 / 2.0);
+    (0..h)
+        .filter_map(|row| {
+            let dy = (row as f64 + 0.5 - ry) / ry;
+            let half = rx * (1.0 - dy * dy).max(0.0).sqrt();
+            let left = (rx - half).floor() as i32;
+            let right = (rx + half).ceil() as i32;
+            (right > left).then_some((x0 + left, y0 + row, right - left, 1))
+        })
+        .collect()
+}
+
+/// Limits where the orb window takes clicks, so clicks on its see-through
+/// corners reach the window underneath. Linux only: it sets an X11 input
+/// shape, and the app always runs on X11 or XWayland there.
+#[tauri::command]
+fn set_hit_region(shapes: Vec<HitShape>, window: WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            use gtk::prelude::WidgetExt;
+            let Ok(gtk_window) = target.gtk_window() else {
+                return;
+            };
+            let region = gtk::cairo::Region::create();
+            for (x, y, w, h) in shapes.iter().flat_map(shape_rects) {
+                let _ = region.union_rectangle(&gtk::cairo::RectangleInt::new(x, y, w, h));
+            }
+            gtk_window.input_shape_combine_region(Some(&region));
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (shapes, window);
+}
+
 /// Hands the desktop snapshot to the tree window once, then forgets it.
 #[tauri::command]
 fn take_snapshot(state: State<AppState>) -> Option<String> {
@@ -443,6 +501,7 @@ fn main() {
             set_view_mode,
             open_tree,
             take_snapshot,
+            set_hit_region,
             close_tree,
             quit_app
         ])
@@ -508,6 +567,25 @@ mod tests {
         assert_eq!(load_from(&path), AppData::default());
         let kept = path.with_extension("corrupt.json");
         assert_eq!(fs::read_to_string(kept).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn round_hit_shape_leaves_corners_out() {
+        let rects = shape_rects(&HitShape { x: 4.0, y: 4.0, w: 48.0, h: 48.0, round: true });
+        assert_eq!(rects.len(), 48);
+        let inside = |px: i32, py: i32| {
+            rects.iter().any(|&(x, y, w, h)| px >= x && px < x + w && py >= y && py < y + h)
+        };
+        assert!(inside(28, 28), "centre");
+        assert!(inside(5, 28) && inside(50, 28), "left and right edges");
+        assert!(!inside(5, 5) && !inside(50, 50), "corners");
+        assert!(!inside(0, 0) && !inside(55, 28), "outside the box");
+    }
+
+    #[test]
+    fn square_hit_shape_is_one_rect() {
+        let rects = shape_rects(&HitShape { x: 4.2, y: 4.0, w: 352.0, h: 48.0, round: false });
+        assert_eq!(rects, vec![(4, 4, 353, 48)]);
     }
 
     #[test]
