@@ -1,10 +1,12 @@
 # Contexted Mind
 
-A small always-on-top orb that holds your current task and a tree of tasks and subtasks.
+A small always-on-top orb that holds the tasks you're working on and a tree of tasks and subtasks.
 
-- **Hover** the orb to see your current task.
+- **Hover** the orb to see what's in progress. The orb turns red when a task in progress is past its deadline.
 - **Click** it to blur the desktop and open the tree, where you can add, edit, delete, finish and focus tasks.
 - **Reorder** tasks by dragging the ⋮⋮ grip at the start of a row. Drop on the top or bottom half of another row to place the task, with its subtasks, above or below it at that row's level. While editing a title, Alt+↑ and Alt+↓ move the task among its siblings.
+- **Focus** marks a task as in progress. Several tasks can be in progress at once; click **★ In progress** to take one off the list.
+- **Due** sets a deadline on any task or subtask: a date, and optionally a time (without one it's due by the end of that day). Once the deadline passes on an unfinished task, the task shows a red **!** and its deadline turns red.
 - **Drag** the orb by the small ✥ handle. It remembers where you left it.
 - **Esc** or a click on the blurred background closes the tree. **Quit** is in the tree's header, because the orb has no taskbar entry.
 

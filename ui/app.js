@@ -1,11 +1,24 @@
 const { invoke } = window.__TAURI__.core;
-const { findTask, deleteTask, setDone, resolveActiveId, moveTask, shiftTask } = window.TaskTree;
+const {
+  findTask,
+  deleteTask,
+  setDone,
+  resolveActiveIds,
+  inTreeOrder,
+  deadlineMoment,
+  isOverdue,
+  anyOverdue,
+  moveTask,
+  shiftTask,
+} = window.TaskTree;
 
 // One page serves two windows: the small transparent orb ("main") and the
 // opaque fullscreen tree ("tree"), which Rust creates when the orb is clicked.
 const isTree = window.__TAURI__.window.getCurrentWindow().label === "tree";
 
-let appData = { active_task_id: null, tasks: [] };
+let appData = { active_task_ids: [], tasks: [] };
+// Tasks whose deadline editor is open, kept across re-renders.
+const openDeadlineEditors = new Set();
 // Orb window only: "pill", "hover" or "tree" (tree window open, orb hidden).
 let currentMode = "pill";
 // The mode the queue is heading to. Hiding the orb while the tree opens fires
@@ -22,24 +35,31 @@ let lastSave = Promise.resolve();
 const el = (id) => document.getElementById(id);
 
 function syncHeaderText() {
-  const active = appData.active_task_id && findTask(appData.tasks, appData.active_task_id);
-  document.body.classList.toggle("no-task", !active);
-  if (active) {
-    el("hover-task-name").textContent = active.title;
-    el("hover-subtext").textContent = "is your current task · Click to edit";
-    el("modal-active-task").textContent = active.title;
+  const ids = inTreeOrder(appData.tasks, appData.active_task_ids);
+  const titles = ids.map((id) => findTask(appData.tasks, id).title);
+  const overdue = anyOverdue(appData.tasks, ids, new Date());
+  document.body.classList.toggle("no-task", titles.length === 0);
+  document.body.classList.toggle("has-overdue", overdue);
+  if (titles.length > 0) {
+    const more = titles.length - 1;
+    el("hover-task-name").textContent = titles[0];
+    el("hover-subtext").textContent =
+      (overdue ? "⚠ Past deadline · " : "") +
+      (more > 0 ? `+${more} more in progress` : "is in progress") +
+      " · Click to edit";
+    el("modal-active-task").textContent = titles.join("  ·  ");
   } else {
-    el("hover-task-name").textContent = "No current task";
-    el("hover-subtext").textContent = "Click to add one";
-    el("modal-active-task").textContent = "None. Add a task or pick one with Focus.";
+    el("hover-task-name").textContent = "Nothing in progress";
+    el("hover-subtext").textContent = "Click to add or pick a task";
+    el("modal-active-task").textContent = "Nothing yet. Add a task or pick some with Focus.";
   }
 }
 
 function persist() {
-  appData.active_task_id = resolveActiveId(appData.tasks, appData.active_task_id);
+  appData.active_task_ids = resolveActiveIds(appData.tasks, appData.active_task_ids);
   syncHeaderText();
   lastSave = invoke("save_tree", {
-    update: { active_task_id: appData.active_task_id, tasks: appData.tasks },
+    update: { active_task_ids: appData.active_task_ids, tasks: appData.tasks },
   });
   return lastSave;
 }
@@ -189,7 +209,7 @@ function iconButton(label, title, className, onClick) {
 }
 
 function buildNodeElement(node) {
-  const isActive = appData.active_task_id === node.id;
+  const isActive = appData.active_task_ids.includes(node.id);
   const wrapper = document.createElement("div");
   wrapper.className = "tree-node";
 
@@ -212,6 +232,11 @@ function buildNodeElement(node) {
     setDone(node, cb.checked);
     await commit();
   });
+
+  const overdueIcon = document.createElement("span");
+  overdueIcon.className = "overdue-icon";
+  overdueIcon.textContent = "!";
+  overdueIcon.setAttribute("role", "img");
 
   const input = document.createElement("input");
   input.type = "text";
@@ -241,14 +266,22 @@ function buildNodeElement(node) {
   actions.className = "task-actions";
 
   const focusBtn = iconButton(
-    isActive ? "★ Current" : "☆ Focus",
-    "Set as current task",
+    isActive ? "★ In progress" : "☆ Focus",
+    isActive ? "Stop working on this task" : "Mark as in progress, alongside any others",
     isActive ? "active-focus" : "",
     async () => {
-      appData.active_task_id = node.id;
+      appData.active_task_ids = isActive
+        ? appData.active_task_ids.filter((id) => id !== node.id)
+        : [...appData.active_task_ids, node.id];
       await commit();
     }
   );
+
+  const dueBtn = iconButton("Due", "", "deadline-btn", () => {
+    if (openDeadlineEditors.has(node.id)) openDeadlineEditors.delete(node.id);
+    else openDeadlineEditors.add(node.id);
+    renderTree();
+  });
   focusBtn.disabled = node.done;
 
   const subBtn = iconButton("+ Subtask", "Add a subtask", "", async () => {
@@ -266,9 +299,12 @@ function buildNodeElement(node) {
     await commit();
   });
 
-  actions.append(focusBtn, subBtn, delBtn);
-  row.append(grip, cb, input, actions);
+  actions.append(dueBtn, focusBtn, subBtn, delBtn);
+  row.append(grip, cb, overdueIcon, input, actions);
+  row.dataset.deadlineFor = node.id;
+  paintDeadline(row, node);
   wrapper.appendChild(row);
+  if (openDeadlineEditors.has(node.id)) wrapper.appendChild(buildDeadlineEditor(node, row));
 
   if (node.children.length > 0) {
     const children = document.createElement("div");
@@ -278,6 +314,87 @@ function buildNodeElement(node) {
   }
   return wrapper;
 }
+
+// --- Deadlines ---
+function formatDeadline(deadline) {
+  const due = deadlineMoment(deadline);
+  if (!due) return "";
+  const hasTime = deadline.includes("T");
+  // A date-only deadline ends at the following midnight; show the day itself.
+  const day = hasTime ? due : new Date(due.getTime() - 1);
+  const opts = { month: "short", day: "numeric" };
+  if (day.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  let text = day.toLocaleDateString(undefined, opts);
+  if (hasTime) text += ", " + day.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return text;
+}
+
+// Updates a row's deadline button and overdue mark without re-rendering, so
+// it can run on a timer and while the deadline editor has focus.
+function paintDeadline(row, node) {
+  const btn = row.querySelector(".deadline-btn");
+  const overdue = isOverdue(node, new Date());
+  row.classList.toggle("overdue", overdue);
+  btn.classList.toggle("has-deadline", Boolean(node.deadline));
+  btn.textContent = node.deadline ? `Due ${formatDeadline(node.deadline)}` : "Due";
+  btn.title = node.deadline ? "Change or clear the deadline" : "Set a deadline";
+  row.querySelector(".overdue-icon").title = overdue
+    ? `Past its deadline (${formatDeadline(node.deadline)})`
+    : "";
+}
+
+function buildDeadlineEditor(node, row) {
+  const editor = document.createElement("div");
+  editor.className = "deadline-editor";
+
+  const [datePart, timePart] = (node.deadline || "").split("T");
+  const date = document.createElement("input");
+  date.type = "date";
+  date.value = datePart || "";
+  date.setAttribute("aria-label", "Deadline date");
+  const time = document.createElement("input");
+  time.type = "time";
+  time.value = timePart || "";
+  time.setAttribute("aria-label", "Deadline time (optional)");
+
+  const save = async () => {
+    if (date.value) node.deadline = time.value ? `${date.value}T${time.value}` : date.value;
+    else delete node.deadline;
+    paintDeadline(row, node);
+    await persist();
+  };
+  date.addEventListener("change", save);
+  time.addEventListener("change", save);
+
+  const label = document.createElement("span");
+  label.className = "deadline-label";
+  label.textContent = "Deadline";
+  const hint = document.createElement("span");
+  hint.className = "deadline-hint";
+  hint.textContent = "Time optional: without one it's due by the end of the day.";
+
+  const clear = iconButton("Clear", "Remove the deadline", "", async () => {
+    delete node.deadline;
+    openDeadlineEditors.delete(node.id);
+    await commit();
+  });
+  const done = iconButton("Done", "Close the deadline editor", "", () => {
+    openDeadlineEditors.delete(node.id);
+    renderTree();
+  });
+
+  editor.append(label, date, time, clear, done, hint);
+  return editor;
+}
+
+// Deadlines pass while the app sits open; check every half minute.
+setInterval(() => {
+  document.querySelectorAll("[data-deadline-for]").forEach((row) => {
+    const node = findTask(appData.tasks, row.dataset.deadlineFor);
+    if (node) paintDeadline(row, node);
+  });
+  syncHeaderText();
+}, 30000);
 
 function renderTree() {
   const container = el("tree-container");
@@ -365,7 +482,10 @@ async function addRootTask() {
   const input = el("new-root-input");
   const title = input.value.trim();
   if (!title) return;
-  appData.tasks.push(newTask(title));
+  const task = newTask(title);
+  appData.tasks.push(task);
+  // With nothing in progress, a new task is the obvious thing to work on.
+  if (appData.active_task_ids.length === 0) appData.active_task_ids.push(task.id);
   input.value = "";
   await commit();
 }

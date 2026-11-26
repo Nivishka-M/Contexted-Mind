@@ -34,12 +34,21 @@ pub struct TaskNode {
     pub id: String,
     pub title: String,
     pub done: bool,
+    /// Local "YYYY-MM-DD" (due by the end of that day) or "YYYY-MM-DDTHH:MM".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
     #[serde(default)]
     pub children: Vec<TaskNode>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AppData {
+    /// Tasks being worked on in parallel.
+    #[serde(default)]
+    pub active_task_ids: Vec<String>,
+    /// The single current task of files saved before several tasks could be
+    /// in progress. Read once by load_from, which moves it into active_task_ids.
+    #[serde(default, skip_serializing)]
     pub active_task_id: Option<String>,
     pub tasks: Vec<TaskNode>,
     // Physical pixels, the unit the OS reports window positions in.
@@ -50,6 +59,7 @@ pub struct AppData {
 impl Default for AppData {
     fn default() -> Self {
         Self {
+            active_task_ids: vec![],
             active_task_id: None,
             tasks: vec![],
             saved_x: 40,
@@ -62,7 +72,7 @@ impl Default for AppData {
 /// edit can never overwrite it with a stale value.
 #[derive(Deserialize, Debug)]
 pub struct TreeUpdate {
-    pub active_task_id: Option<String>,
+    pub active_task_ids: Vec<String>,
     pub tasks: Vec<TaskNode>,
 }
 
@@ -101,8 +111,15 @@ fn load_from(path: &Path) -> AppData {
     let Ok(raw) = fs::read_to_string(path) else {
         return AppData::default();
     };
-    match serde_json::from_str(&raw) {
-        Ok(parsed) => parsed,
+    match serde_json::from_str::<AppData>(&raw) {
+        Ok(mut parsed) => {
+            if let Some(old) = parsed.active_task_id.take() {
+                if parsed.active_task_ids.is_empty() {
+                    parsed.active_task_ids.push(old);
+                }
+            }
+            parsed
+        }
         Err(_) => {
             // Keep an unreadable file so the next save can't destroy the user's tree.
             let _ = fs::rename(path, path.with_extension("corrupt.json"));
@@ -127,7 +144,7 @@ fn get_state(state: State<AppState>) -> AppData {
 #[tauri::command]
 fn save_tree(update: TreeUpdate, state: State<AppState>) -> Result<(), String> {
     let mut rt = state.0.lock().unwrap();
-    rt.data.active_task_id = update.active_task_id;
+    rt.data.active_task_ids = update.active_task_ids;
     rt.data.tasks = update.tasks;
     save_to(&storage_path(), &rt.data).map_err(|e| e.to_string())
 }
@@ -541,15 +558,18 @@ mod tests {
     fn save_then_load_round_trips() {
         let path = temp_file("round-trip");
         let data = AppData {
-            active_task_id: Some("a".into()),
+            active_task_ids: vec!["a".into(), "c".into()],
+            active_task_id: None,
             tasks: vec![TaskNode {
                 id: "a".into(),
                 title: "Parent".into(),
                 done: false,
+                deadline: Some("2026-12-01T17:30".into()),
                 children: vec![TaskNode {
                     id: "b".into(),
                     title: "Child".into(),
                     done: true,
+                    deadline: None,
                     children: vec![],
                 }],
             }],
@@ -586,6 +606,23 @@ mod tests {
     fn square_hit_shape_is_one_rect() {
         let rects = shape_rects(&HitShape { x: 4.2, y: 4.0, w: 352.0, h: 48.0, round: false });
         assert_eq!(rects, vec![(4, 4, 353, 48)]);
+    }
+
+    #[test]
+    fn old_single_current_task_becomes_in_progress_list() {
+        let path = temp_file("migrate");
+        fs::write(
+            &path,
+            r#"{"active_task_id":"a","tasks":[{"id":"a","title":"A","done":false,"children":[]}],"saved_x":1,"saved_y":2}"#,
+        )
+        .unwrap();
+        let data = load_from(&path);
+        assert_eq!(data.active_task_ids, vec!["a".to_string()]);
+        assert_eq!(data.tasks[0].deadline, None);
+        save_to(&path, &data).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("\"active_task_id\""));
+        assert!(!saved.contains("deadline"));
     }
 
     #[test]
